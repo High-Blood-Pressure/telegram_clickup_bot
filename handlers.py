@@ -379,7 +379,7 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 task_name = task_name[:27] + "..."
 
             # Форматируем строку таблицы
-            message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<10} │\n"
+            message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<11} │\n"
 
         message += "└──────────────────────────────────────┴───────────┴───────────┴─────────────┘\n"
         message += "</pre>\n\n"
@@ -484,8 +484,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task_name = next((t["name"] for t in helpers.user_logging_state[user_id]["tasks"]
                               if t["id"] == task_id), "Задача")
 
+            estimated = next((t["estimated_minutes"] for t in helpers.user_logging_state[user_id]["tasks"]
+                              if t["id"] == task_id), "Оценка")
+
+            estimated_hrs = int(estimated) / 60 if estimated else 0
+            logged_minutes = helpers.get_task_time_for_user(task_id, helpers.user_logging_state[user_id]["clickup_user_id"])
+            logged_hours = logged_minutes / 60.0
+
             await query.edit_message_text(
-                f"⏱ Выбрана задача: {task_name}\n\n"
+                f"Выбрана задача: {task_name}\n\n"
+                f"Оценка задачи (в часах): {estimated_hrs:.1f}\n"
+                f"Залогированное время (в часах): {logged_hours:.1f}\n\n"
                 "Введите время в формате:\n"
                 "• 1.5h - полтора часа\n"
                 "• 90m - 90 минут\n"

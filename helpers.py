@@ -360,7 +360,7 @@ async def get_all_user_tasks_in_sprint(sprint_id: str, user_id: str) -> List[Dic
             response = await client.get(
                 f"https://api.clickup.com/api/v2/list/{sprint_id}/task",
                 params={
-                    "archived": "false",
+                    "include_closed": "true",
                     "subtasks": "true",
                     "assignees[]": user_id
                 },
@@ -507,6 +507,11 @@ def get_sprint_tasks_from_cache(sprint_id: str) -> List[Dict]:
                         "estimated_minutes": row[4]
                     })
                 return tasks
+
+    except sqlite3.OperationalError as e:
+        logger.error(f"Ошибка блокировки БД: {e}")
+        return False
+
     except Exception as e:
         logger.error(f"Ошибка при получении задач из кэша: {e}")
         return []
@@ -515,23 +520,29 @@ def get_sprint_tasks_from_cache(sprint_id: str) -> List[Dict]:
 def cache_task(task_data: dict):
     """Кэширует информацию о задаче в БД"""
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO tasks 
-                (task_id, name, url, status, workspace_id, sprint_id, estimated_minutes, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                task_data["id"],
-                task_data.get("name", ""),
-                task_data.get("url", ""),
-                task_data.get("status", "unknown"),
-                task_data.get("workspace_id"),
-                task_data.get("sprint_id"),
-                task_data.get("estimated_minutes", 0),  # Новое поле
-                time.time()
-            ))
-            conn.commit()
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO tasks 
+                    (task_id, name, url, status, workspace_id, sprint_id, estimated_minutes, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    task_data["id"],
+                    task_data.get("name", ""),
+                    task_data.get("url", ""),
+                    task_data.get("status", "unknown"),
+                    task_data.get("workspace_id"),
+                    task_data.get("sprint_id"),
+                    task_data.get("estimated_minutes", 0),  # Новое поле
+                    time.time()
+                ))
+                conn.commit()
+
+    except sqlite3.OperationalError as e:
+        logger.error(f"Ошибка блокировки БД: {e}")
+        return False
+
     except Exception as e:
         logger.error(f"Ошибка при кэшировании задачи: {e}")
 
