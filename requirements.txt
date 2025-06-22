@@ -1,0 +1,4 @@
+python-telegram-bot
+python-dotenv
+httpx
+pip install "python-telegram-bot[job-queue]"
