@@ -8,18 +8,12 @@ import httpx
 import asyncio
 from typing import Dict, Any, Set, List, Optional
 from dotenv import load_dotenv
-from telegram.ext import Application
-
-# ======================
-#  LOGGING
-# ======================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
 
 load_dotenv()
 DATA_FILE = "user_contexts.json"
@@ -30,18 +24,16 @@ user_data: Dict[int, Dict[str, Any]]
 user_logging_state = {}
 application = None
 shutting_down = False
-data_lock = threading.Lock()
+user_data_dirty = False
+data_lock = threading.RLock()
 
-# ======================
-#  helper functions
-# ======================
 
 def set_application(app):
     global application
     application = app
 
 
-def get_application() -> Application:
+def get_application():
     return application
 
 
@@ -76,42 +68,49 @@ def load_user_data() -> Dict[int, Dict[str, Any]]:
         return {}
 
     try:
-        with data_lock:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            # Преобразуем строковые ключи в целые числа
+            return {int(k): v for k, v in data.items()}
     except Exception as e:
         logger.error(f"Ошибка загрузки данных: {e}")
         return {}
 
 
+# Инициализация данных
 user_data = load_user_data()
 logger.info(f"Загружены данные для {len(user_data)} пользователей")
 
 
 def save_user_data():
+    global user_data_dirty
     try:
         with data_lock:
             with open(DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(user_data, f, indent=2, ensure_ascii=False)
+            user_data_dirty = False
     except Exception as e:
         logger.error(f"Ошибка сохранения данных: {e}")
 
 
+def save_user_data_if_dirty():
+    global user_data_dirty
+    if user_data_dirty:
+        save_user_data()
+
+
 def update_user_context(user_id: int, key: str, value: Any) -> None:
-    """Обновляет контекст пользователя и сохраняет в файл"""
-    global user_data
+    """Обновляет контекст пользователя"""
+    global user_data, user_data_dirty
 
-    # Получаем текущий контекст
-    context = get_user_context(user_id)
+    with data_lock:
+        context = get_user_context(user_id)
 
-    # Обновляем значение
-    context[key] = value
-    user_data[user_id] = context
-
-    # Сохраняем изменения
-    save_user_data()
-
-    logger.debug(f"Обновлен контекст для {user_id}: {key} = {value}")
+        if context.get(key) != value:
+            context[key] = value
+            user_data[user_id] = context
+            user_data_dirty = True
+            logger.debug(f"Обновлен контекст для {user_id}: {key} = {value}")
 
 
 async def get_clickup_teams() -> List[Dict]:
@@ -120,21 +119,19 @@ async def get_clickup_teams() -> List[Dict]:
         return []
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 "https://api.clickup.com/api/v2/team",
-                headers={"Authorization": CLICKUP_API_TOKEN},
-                timeout=10.0
+                headers={"Authorization": CLICKUP_API_TOKEN}
             )
             response.raise_for_status()
             data = response.json()
             return data.get("teams", [])
-    except httpx.HTTPError as e:
-        logger.error(f"Ошибка при получении workspace: {e}")
-        return []
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Ошибка HTTP при получении workspace: {e.response.status_code}")
     except Exception as e:
-        logger.exception(f"Неизвестная ошибка: {e}")
-        return []
+        logger.exception(f"Ошибка при получении workspace: {e}")
+    return []
 
 
 async def stop_application() -> None:
@@ -163,20 +160,19 @@ async def stop_application() -> None:
 
 
 def get_user_context(user_id: int) -> Dict[str, Any]:
-    global user_data
+    """Возвращает контекст пользователя"""
+    with data_lock:
+        if user_id not in user_data:
+            user_data[user_id] = {
+                "current_workspace": None,
+                "current_sprint": None,
+                "current_user": None
+            }
+            global user_data_dirty
+            user_data_dirty = True
+            logger.info(f"Создан новый контекст для пользователя {user_id}")
 
-    # Если пользователь новый, создаем для него контекст
-    if user_id not in user_data:
-        user_data[user_id] = {
-            "current_workspace": None,
-            "current_sprint": None,
-            "current_user": None
-        }
-        # Сохраняем нового пользователя
-        save_user_data()
-        logger.info(f"Создан новый контекст для пользователя {user_id}")
-
-    return user_data[user_id]
+        return user_data[user_id]
 
 
 def is_context_ready(user_id: int) -> bool:
@@ -202,12 +198,11 @@ async def get_clickup_sprints(workspace_id: str) -> List[Dict]:
         return []
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             # Получаем все папки в workspace
             folders_response = await client.get(
                 f"https://api.clickup.com/api/v2/team/{workspace_id}/folder?archived=false",
-                headers={"Authorization": CLICKUP_API_TOKEN},
-                timeout=15.0
+                headers={"Authorization": CLICKUP_API_TOKEN}
             )
             folders_response.raise_for_status()
             folders = folders_response.json().get("folders", [])
@@ -215,7 +210,7 @@ async def get_clickup_sprints(workspace_id: str) -> List[Dict]:
             # Ищем папку с названием, начинающимся на "Sprint"
             sprint_folder = None
             for folder in folders:
-                if folder.get("name", "").startswith("Sprint"):
+                if folder.get("name", "").lower().startswith("sprint"):
                     sprint_folder = folder
                     break
 
@@ -226,8 +221,7 @@ async def get_clickup_sprints(workspace_id: str) -> List[Dict]:
             # Получаем списки из папки спринтов
             lists_response = await client.get(
                 f"https://api.clickup.com/api/v2/folder/{sprint_folder['id']}/list?archived=false",
-                headers={"Authorization": CLICKUP_API_TOKEN},
-                timeout=10.0
+                headers={"Authorization": CLICKUP_API_TOKEN}
             )
             lists_response.raise_for_status()
             sprint_lists = lists_response.json().get("lists", [])
@@ -244,14 +238,10 @@ async def get_clickup_sprints(workspace_id: str) -> List[Dict]:
 
             return sprints
     except httpx.HTTPStatusError as e:
-        logger.error(f"Ошибка HTTP при получении спринтов: {e.response.status_code} - {e.response.text}")
-        return []
-    except httpx.RequestError as e:
-        logger.error(f"Сетевая ошибка при получении спринтов: {e}")
-        return []
+        logger.error(f"Ошибка HTTP при получении спринтов: {e.response.status_code}")
     except Exception as e:
-        logger.exception(f"Неизвестная ошибка при получении спринтов: {e}")
-        return []
+        logger.exception(f"Ошибка при получении спринтов: {e}")
+    return []
 
 
 async def get_clickup_list_members(list_id: str) -> List[Dict]:
@@ -373,7 +363,7 @@ async def log_time_to_clickup(workspace_id: str, task_id: str, duration_ms: int,
 
     try:
         # Вычисляем начало задачи (текущее время минус длительность)
-        end_time = int(time.time() * 1000)  # Текущее время в миллисекундах
+        end_time = int(time.time() * 1000)
         start_time = end_time - duration_ms
 
         payload = {
@@ -383,27 +373,22 @@ async def log_time_to_clickup(workspace_id: str, task_id: str, duration_ms: int,
             "assignee": int(user_id)
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"https://api.clickup.com/api/v2/team/{workspace_id}/time_entries",
                 headers={
                     "Authorization": CLICKUP_API_TOKEN,
                     "Content-Type": "application/json"
                 },
-                json=payload,
-                timeout=10.0
+                json=payload
             )
             response.raise_for_status()
             return True
     except httpx.HTTPStatusError as e:
-        logger.error(f"Ошибка HTTP при логировании времени: {e.response.status_code} - {e.response.text}")
-        return False
-    except httpx.RequestError as e:
-        logger.error(f"Сетевая ошибка при логировании времени: {e}")
-        return False
+        logger.error(f"Ошибка HTTP при логировании времени: {e.response.status_code}")
     except Exception as e:
-        logger.exception(f"Неизвестная ошибка при логировании времени: {e}")
-        return False
+        logger.exception(f"Ошибка при логировании времени: {e}")
+    return False
 
 
 def parse_time_input(time_str: str) -> Optional[int]:

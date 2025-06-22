@@ -154,7 +154,7 @@ async def log_my_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tasks = await helpers.get_user_tasks(sprint_id, clickup_user_id)
 
     if not tasks:
-        await update.message.callback_query.edit_message_text("❌ Нет задач в работе. Все задачи завершены или еще не начаты.")
+        await update.callback_query.edit_message_text("❌ Нет задач в работе. Все задачи завершены или еще не начаты.")
         return
 
     # Форматируем задачи для отображения

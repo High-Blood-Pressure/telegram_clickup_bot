@@ -1,8 +1,6 @@
 import signal
 import asyncio
-
 from telegram import Update
-
 import helpers
 import handlers
 from telegram.ext import (
@@ -13,12 +11,9 @@ from telegram.ext import (
     filters, ContextTypes
 )
 
-
-async def auto_save_task():
-    """Фоновая задача для автоматического сохранения данных"""
-    while True:
-        await asyncio.sleep(300)  # Сохраняем каждые 5 минут
-        helpers.save_user_data()
+async def auto_save_task(ctx: ContextTypes.DEFAULT_TYPE):
+    """Асинхронная задача для сохранения данных"""
+    helpers.save_user_data_if_dirty()
 
 
 def main():
@@ -28,8 +23,6 @@ def main():
 
     # Создаем приложение
     application = ApplicationBuilder().token(helpers.TELEGRAM_BOT_TOKEN).build()
-
-    # Сохраняем приложение в helpers
     helpers.set_application(application)
 
     # Регистрация обработчиков команд
@@ -43,8 +36,8 @@ def main():
 
     # Создаем фоновую задачу на сохранение
     application.job_queue.run_repeating(
-        lambda ctx: helpers.save_user_data(),
-        interval=300,  # 5 минут
+        auto_save_task,
+        interval=300,
         first=10
     )
 
@@ -53,7 +46,7 @@ def main():
     # Обработка сигналов
     def signal_handler(signum, frame):
         helpers.logger.info(f"Получен сигнал {signum}, инициирую выключение...")
-        helpers.save_user_data()  # Сохраняем данные перед выключением
+        helpers.save_user_data_if_dirty()
         asyncio.create_task(helpers.stop_application())
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -68,19 +61,15 @@ def main():
     finally:
         helpers.logger.info("Работа бота завершена")
 
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает ошибки в обработчиках."""
     helpers.logger.error(msg="Исключение при обработке обновления:", exc_info=context.error)
 
-    # Логируем дополнительную информацию
     if update:
         helpers.logger.error(f"Ошибка в обновлении: {update}")
 
-    # Отправляем сообщение об ошибке пользователю
     if update and isinstance(update, Update) and update.effective_chat:
         try:
-            # Формируем сообщение об ошибке
             error_text = (
                 "⚠️ *Произошла ошибка*\n\n"
                 "Пожалуйста, попробуйте повторить операцию позже. "
@@ -96,8 +85,5 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             helpers.logger.error(f"Ошибка при отправке сообщения об ошибке: {e}")
 
-
-
 if __name__ == "__main__":
     main()
-
