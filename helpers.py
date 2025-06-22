@@ -46,6 +46,7 @@ def init_db():
             status TEXT,
             workspace_id TEXT,
             sprint_id TEXT,
+            estimated_minutes REAL,  
             last_updated REAL
         )
         """)
@@ -347,22 +348,21 @@ def format_workspaces(workspaces: List[Dict]) -> List[Dict]:
     ]
 
 
-async def get_user_tasks(sprint_id: str, user_id: str) -> List[Dict]:
-    """Получает задачи пользователя в спринте со статусом 'in progress'"""
+async def get_all_user_tasks_in_sprint(sprint_id: str, user_id: str) -> List[Dict]:
+    """Получает ВСЕ задачи пользователя в спринте (без фильтрации по статусу)"""
     if not CLICKUP_API_TOKEN:
         logger.error("ClickUp API токен не настроен!")
         return []
 
     try:
         async with httpx.AsyncClient() as client:
-            # Получаем задачи в спринте с фильтрами
+            # Получаем задачи в спринте с фильтрами (без статуса)
             response = await client.get(
                 f"https://api.clickup.com/api/v2/list/{sprint_id}/task",
                 params={
                     "archived": "false",
                     "subtasks": "true",
-                    "assignees[]": user_id,
-                    "statuses[]": "in progress"
+                    "assignees[]": user_id
                 },
                 headers={"Authorization": CLICKUP_API_TOKEN},
                 timeout=15.0
@@ -385,11 +385,16 @@ def format_tasks(tasks: List[Dict]) -> List[Dict]:
     """Форматирует список задач для отображения"""
     formatted = []
     for task in tasks:
+        # Извлекаем оценку времени
+        estimated_ms = task.get("time_estimate")
+        estimated_minutes = estimated_ms / 60000.0 if estimated_ms else 0
+
         formatted.append({
             "id": task["id"],
             "name": task.get("name", f"Task {task['id']}"),
             "url": task.get("url", ""),
-            "status": task.get("status", {}).get("status", "unknown")
+            "status": task.get("status", {}).get("status", "unknown"),
+            "estimated_minutes": estimated_minutes  # Новое поле
         })
     return formatted
 
@@ -476,58 +481,34 @@ def get_task_time_for_user(task_id: str, user_id: str) -> float:
         return 0.0
 
 
-def get_all_task_time() -> List[Dict]:
-    """Возвращает все залогированное время (для отчета)"""
+def get_sprint_tasks_from_cache(sprint_id: str) -> List[Dict]:
+    """Возвращает все задачи спринта из кэша"""
     try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                           SELECT t.task_id,
-                                  t.name AS task_name,
-                                  tt.user_id,
-                                  tt.total_minutes
-                           FROM task_time tt
-                                    JOIN tasks t ON tt.task_id = t.task_id
-                           """)
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                               SELECT t.task_id,
+                                      t.name,
+                                      t.url,
+                                      t.status,
+                                      t.estimated_minutes
+                               FROM tasks t
+                               WHERE t.sprint_id = ?
+                               """, (sprint_id,))
 
-            return [
-                {
-                    "task_id": row[0],
-                    "task_name": row[1],
-                    "user_id": row[2],
-                    "total_minutes": row[3]
-                }
-                for row in cursor.fetchall()
-            ]
+                tasks = []
+                for row in cursor.fetchall():
+                    tasks.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "url": row[2],
+                        "status": row[3],
+                        "estimated_minutes": row[4]
+                    })
+                return tasks
     except Exception as e:
-        logger.error(f"Ошибка при получении данных о времени: {e}")
-        return []
-
-
-def get_user_task_time(user_id: str) -> List[Dict]:
-    """Возвращает все время пользователя по задачам"""
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                           SELECT tt.task_id,
-                                  t.name AS task_name,
-                                  tt.total_minutes
-                           FROM task_time tt
-                                    JOIN tasks t ON tt.task_id = t.task_id
-                           WHERE tt.user_id = ?
-                           """, (user_id,))
-
-            return [
-                {
-                    "task_id": row[0],
-                    "task_name": row[1],
-                    "total_minutes": row[2]
-                }
-                for row in cursor.fetchall()
-            ]
-    except Exception as e:
-        logger.error(f"Ошибка при получении данных пользователя: {e}")
+        logger.error(f"Ошибка при получении задач из кэша: {e}")
         return []
 
 
@@ -538,8 +519,8 @@ def cache_task(task_data: dict):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO tasks 
-                (task_id, name, url, status, workspace_id, sprint_id, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, name, url, status, workspace_id, sprint_id, estimated_minutes, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task_data["id"],
                 task_data.get("name", ""),
@@ -547,8 +528,21 @@ def cache_task(task_data: dict):
                 task_data.get("status", "unknown"),
                 task_data.get("workspace_id"),
                 task_data.get("sprint_id"),
+                task_data.get("estimated_minutes", 0),  # Новое поле
                 time.time()
             ))
             conn.commit()
     except Exception as e:
         logger.error(f"Ошибка при кэшировании задачи: {e}")
+
+
+async def get_user_tasks(sprint_id: str, user_id: str) -> List[Dict]:
+    """Получает задачи пользователя в спринте со статусом 'in progress'"""
+    # Используем новую функцию для получения всех задач
+    all_tasks = await get_all_user_tasks_in_sprint(sprint_id, user_id)
+
+    # Фильтруем задачи со статусом "in progress"
+    return [
+        task for task in all_tasks
+        if task.get("status", {}).get("status", "").lower() == "in progress"
+    ]

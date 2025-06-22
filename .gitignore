@@ -185,3 +185,7 @@ cython_debug/
 .idea/modules.xml
 .idea/vcs.xml
 PyCharmMiscProject.iml
+.idea/dataSources.xml
+timelogger.db
+timelogger.db
+*.db

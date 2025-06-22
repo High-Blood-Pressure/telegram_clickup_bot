@@ -151,25 +151,43 @@ async def log_my_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sprint_id = context_data["current_sprint"]
     clickup_user_id = context_data["current_user"]
-    tasks = await helpers.get_user_tasks(sprint_id, clickup_user_id)
+
+    # Получаем задачи из ClickUp (все задачи пользователя в спринте)
+    tasks = await helpers.get_all_user_tasks_in_sprint(sprint_id, clickup_user_id)
 
     if not tasks:
-        await update.callback_query.edit_message_text("❌ Нет задач в работе. Все задачи завершены или еще не начаты.")
+        await update.callback_query.edit_message_text("❌ У пользователя нет задач в спринте. ")
         return
 
-    # Кэшируем задачи
+    # Кэшируем задачи с извлечением estimated времени
     for task in tasks:
+        # Извлекаем оценку времени в миллисекундах и конвертируем в минуты
+        estimated_ms = task.get("time_estimate")
+        estimated_minutes = estimated_ms / 60000.0 if estimated_ms else 0
+
+        # Получаем текущий статус задачи
+        status = task.get("status", {}).get("status", "unknown")
+
         helpers.cache_task({
             "id": task["id"],
             "name": task.get("name", ""),
             "url": task.get("url", ""),
-            "status": task.get("status", {}).get("status", "unknown"),
+            "status": status,
             "workspace_id": context_data["current_workspace"],
-            "sprint_id": sprint_id
+            "sprint_id": sprint_id,
+            "estimated_minutes": estimated_minutes
         })
 
+    # Фильтруем задачи для отображения (только со статусом "in progress")
+    tasks_in_progress = [task for task in tasks
+                         if task.get("status", {}).get("status", "").lower() == "in progress"]
+
+    if not tasks_in_progress:
+        await update.callback_query.edit_message_text("❌ Нет задач в работе. Все задачи завершены или еще не начаты.")
+        return
+
     # Форматируем задачи для отображения
-    formatted_tasks = helpers.format_tasks(tasks)
+    formatted_tasks = helpers.format_tasks(tasks_in_progress)
 
     # Сохраняем задачи в состоянии пользователя
     helpers.user_logging_state[user_id] = {
@@ -290,8 +308,8 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Изменить workspace", callback_data="change_workspace")],
             [InlineKeyboardButton("Изменить спринт", callback_data="change_sprint")],
             [InlineKeyboardButton("Изменить пользователя", callback_data="change_user")],
-            [InlineKeyboardButton("Залогировать время в задачу пользователя", callback_data="log_my_time")]
-        ]
+            [InlineKeyboardButton("Залогировать время", callback_data="log_my_time")],
+            [InlineKeyboardButton("📊 Статистика задач", callback_data="show_stats")]]
 
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -310,6 +328,81 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
         helpers.logger.error(f"Ошибка в current_context: {e}")
         await update.message.reply_text("⚠️ Произошла ошибка при отображении контекста. Попробуйте позже.")
 
+
+async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику задач пользователя в текущем спринте в виде таблицы"""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    context_data = helpers.get_user_context(user_id)
+
+    # Проверяем конфигурацию
+    required = ["current_workspace", "current_sprint", "current_user"]
+    if not all(context_data.get(key) for key in required):
+        await query.edit_message_text("❌ Конфигурация не завершена!")
+        return
+
+    sprint_id = context_data["current_sprint"]
+    user_id_str = context_data["current_user"]
+
+    try:
+        # Получаем задачи из локального кэша
+        tasks = helpers.get_sprint_tasks_from_cache(sprint_id)
+
+        if not tasks:
+            await query.edit_message_text("❌ Нет данных о задачах в этом спринте.")
+            return
+
+        # Форматируем статистику в виде таблицы
+        message = "📊 <b>Статистика задач:</b>\n\n"
+        message += "<pre>"
+        message += "┌──────────────────────────────────────┬───────────┬───────────┬─────────────┐\n"
+        message += "│ Задача                               │ Оценка (ч)│ Залог. (ч)│ Статус      │\n"
+        message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
+
+        # Строки таблицы
+        for task in tasks:
+            # Получаем залогированное время для задачи
+            logged_minutes = helpers.get_task_time_for_user(task["id"], user_id_str)
+
+            # Конвертируем минуты в часы
+            estimated_hours = task['estimated_minutes'] / 60 if task.get('estimated_minutes') else 0
+            logged_hours = logged_minutes / 60
+
+            # Форматируем значения
+            estimated_str = f"{estimated_hours:.1f}" if estimated_hours > 0 else "-"
+            logged_str = f"{logged_hours:.1f}" if logged_hours > 0 else "-"
+
+            # Обрезаем длинное название задачи
+            task_name = task['name']
+            if len(task_name) > 30:
+                task_name = task_name[:27] + "..."
+
+            # Форматируем строку таблицы
+            message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<10} │\n"
+
+        message += "└──────────────────────────────────────┴───────────┴───────────┴─────────────┘\n"
+        message += "</pre>\n\n"
+
+        # Добавляем общую сводку
+        total_estimated = sum(task['estimated_minutes'] for task in tasks if task.get('estimated_minutes'))
+        total_logged = sum(helpers.get_task_time_for_user(task["id"], user_id_str) for task in tasks)
+
+        # Конвертируем в часы
+        total_estimated_hours = total_estimated / 60
+        total_logged_hours = total_logged / 60
+
+        message += (
+            f"<b>Итого по спринту:</b>\n"
+            f"• Всего оценено: {total_estimated_hours:.1f} ч\n"
+            f"• Всего залогировано: {total_logged_hours:.1f} ч\n"
+        )
+
+        await query.edit_message_text(message, parse_mode="HTML")
+
+    except Exception as e:
+        helpers.logger.error(f"Ошибка при получении статистики: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке статистики")
 # ======================
 #  BUTTON HANDLERS
 # ======================
@@ -337,6 +430,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "log_my_time":
         await query.edit_message_text("🔄 Загружаю список задач...")
         await log_my_time(update, context)
+        return
+    elif data == "show_stats":  # Новая обработка
+        await query.edit_message_text("🔄 Загружаю статистику...")
+        await show_statistics(update, context)
         return
 
     if data.startswith("ws_"):
