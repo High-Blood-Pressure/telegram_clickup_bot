@@ -6,6 +6,7 @@ import time
 import threading
 import httpx
 import asyncio
+import sqlite3
 from typing import Dict, Any, Set, List, Optional
 from dotenv import load_dotenv
 
@@ -25,7 +26,45 @@ user_logging_state = {}
 application = None
 shutting_down = False
 user_data_dirty = False
+DB_FILE = "timelogger.db"
+
 data_lock = threading.RLock()
+db_lock = threading.RLock()
+
+
+def init_db():
+    """Инициализирует базу данных"""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+
+        # Таблица задач (кэшируем информацию о задачах)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT,
+            status TEXT,
+            workspace_id TEXT,
+            sprint_id TEXT,
+            last_updated REAL
+        )
+        """)
+
+        # Таблица для хранения суммарного времени по участникам задач
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS task_time (
+            task_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            total_minutes REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (task_id, user_id),
+            FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+        )
+        """)
+
+        conn.commit()
+
+
+init_db()
 
 
 def set_application(app):
@@ -355,42 +394,6 @@ def format_tasks(tasks: List[Dict]) -> List[Dict]:
     return formatted
 
 
-async def log_time_to_clickup(workspace_id: str, task_id: str, duration_ms: int, user_id: str) -> bool:
-    """Логирует время в ClickUp"""
-    if not CLICKUP_API_TOKEN:
-        logger.error("ClickUp API токен не настроен!")
-        return False
-
-    try:
-        # Вычисляем начало задачи (текущее время минус длительность)
-        end_time = int(time.time() * 1000)
-        start_time = end_time - duration_ms
-
-        payload = {
-            "tid": task_id,
-            "start": start_time,
-            "duration": duration_ms,
-            "assignee": int(user_id)
-        }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"https://api.clickup.com/api/v2/team/{workspace_id}/time_entries",
-                headers={
-                    "Authorization": CLICKUP_API_TOKEN,
-                    "Content-Type": "application/json"
-                },
-                json=payload
-            )
-            response.raise_for_status()
-            return True
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Ошибка HTTP при логировании времени: {e.response.status_code}")
-    except Exception as e:
-        logger.exception(f"Ошибка при логировании времени: {e}")
-    return False
-
-
 def parse_time_input(time_str: str) -> Optional[int]:
     """Преобразует строку времени в миллисекунды"""
     try:
@@ -419,3 +422,133 @@ def parse_time_input(time_str: str) -> Optional[int]:
         return int(total_minutes * 60 * 1000)
     except ValueError:
         return None
+
+
+def log_time_locally(task_id: str, user_id: str, duration_minutes: float) -> bool:
+    """Добавляет время к суммарному значению для участника задачи"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+
+                # Используем UPSERT для обновления или создания записи
+                cursor.execute("""
+                               INSERT INTO task_time (task_id, user_id, total_minutes)
+                               VALUES (?, ?, ?) ON CONFLICT(task_id, user_id) DO
+                               UPDATE SET
+                                   total_minutes = total_minutes + excluded.total_minutes
+                               """, (task_id, user_id, duration_minutes))
+
+                conn.commit()
+                return True
+
+    except sqlite3.OperationalError as e:
+        logger.error(f"Ошибка блокировки БД: {e}")
+        return False
+
+    except Exception as e:
+        logger.exception(f"Критическая ошибка при сохранении времени: {e}")
+        return False
+
+
+def get_task_time_for_user(task_id: str, user_id: str) -> float:
+    """Возвращает общее время пользователя по задаче"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                               SELECT total_minutes
+                               FROM task_time
+                               WHERE task_id = ?
+                                 AND user_id = ?
+                               """, (task_id, user_id))
+
+                result = cursor.fetchone()
+                return result[0] if result else 0.0
+
+    except sqlite3.OperationalError as e:
+        logger.error(f"Ошибка блокировки БД: {e}")
+        return False
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении времени задачи: {e}")
+        return 0.0
+
+
+def get_all_task_time() -> List[Dict]:
+    """Возвращает все залогированное время (для отчета)"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                           SELECT t.task_id,
+                                  t.name AS task_name,
+                                  tt.user_id,
+                                  tt.total_minutes
+                           FROM task_time tt
+                                    JOIN tasks t ON tt.task_id = t.task_id
+                           """)
+
+            return [
+                {
+                    "task_id": row[0],
+                    "task_name": row[1],
+                    "user_id": row[2],
+                    "total_minutes": row[3]
+                }
+                for row in cursor.fetchall()
+            ]
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных о времени: {e}")
+        return []
+
+
+def get_user_task_time(user_id: str) -> List[Dict]:
+    """Возвращает все время пользователя по задачам"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                           SELECT tt.task_id,
+                                  t.name AS task_name,
+                                  tt.total_minutes
+                           FROM task_time tt
+                                    JOIN tasks t ON tt.task_id = t.task_id
+                           WHERE tt.user_id = ?
+                           """, (user_id,))
+
+            return [
+                {
+                    "task_id": row[0],
+                    "task_name": row[1],
+                    "total_minutes": row[2]
+                }
+                for row in cursor.fetchall()
+            ]
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных пользователя: {e}")
+        return []
+
+
+def cache_task(task_data: dict):
+    """Кэширует информацию о задаче в БД"""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO tasks 
+                (task_id, name, url, status, workspace_id, sprint_id, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                task_data["id"],
+                task_data.get("name", ""),
+                task_data.get("url", ""),
+                task_data.get("status", "unknown"),
+                task_data.get("workspace_id"),
+                task_data.get("sprint_id"),
+                time.time()
+            ))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка при кэшировании задачи: {e}")

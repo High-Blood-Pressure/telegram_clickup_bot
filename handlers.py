@@ -157,6 +157,17 @@ async def log_my_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text("❌ Нет задач в работе. Все задачи завершены или еще не начаты.")
         return
 
+    # Кэшируем задачи
+    for task in tasks:
+        helpers.cache_task({
+            "id": task["id"],
+            "name": task.get("name", ""),
+            "url": task.get("url", ""),
+            "status": task.get("status", {}).get("status", "unknown"),
+            "workspace_id": context_data["current_workspace"],
+            "sprint_id": sprint_id
+        })
+
     # Форматируем задачи для отображения
     formatted_tasks = helpers.format_tasks(tasks)
 
@@ -333,7 +344,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         helpers.update_user_context(user_id, "current_workspace", workspace_id)
         helpers.update_user_context(user_id, "current_sprint", None)  # Сбрасываем спринт
         helpers.update_user_context(user_id, "current_user", None)  # Сбрасываем пользователя
-        await query.edit_message_text(f"✅ Workspace установлен: ID {workspace_id}workspace_id\n⏳ Загружаю контекстное меню..")
+        await query.edit_message_text(f"✅ Workspace установлен: ID {workspace_id}\n⏳ Загружаю контекстное меню..")
         await current_context(update, context)
 
 
@@ -405,7 +416,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in helpers.user_logging_state and "task_id" in helpers.user_logging_state[user_id]:
         # Парсим введенное время
         duration_ms = helpers.parse_time_input(message_text)
-
         if not duration_ms or duration_ms <= 0:
             await update.message.reply_text(
                 "❌ Неверный формат времени. Используйте:\n"
@@ -417,17 +427,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Получаем данные для логирования
         task_id = helpers.user_logging_state[user_id]["task_id"]
-        workspace_id = helpers.user_logging_state[user_id]["workspace_id"]
         clickup_user_id = helpers.user_logging_state[user_id]["clickup_user_id"]
+
+        # Проверим, что задача существует в состоянии пользователя
+        task_exists = any(task["id"] == task_id
+                          for task in helpers.user_logging_state[user_id]["tasks"])
+
+        if not task_exists:
+            await update.message.reply_text("❌ Ошибка: задача не найдена")
+            del helpers.user_logging_state[user_id]
+            return
 
         # Логируем время
         loading_msg = await update.message.reply_text("⏳ Сохраняю время...")
-        success = await helpers.log_time_to_clickup(
-            workspace_id,
-            task_id,
-            duration_ms,
-            clickup_user_id
-        )
+
+        # Сохраняем время локально
+        duration_minutes = duration_ms / 60000.0  # Конвертируем в минуты
+        success = helpers.log_time_locally(task_id, clickup_user_id, duration_minutes)
 
         # Удаляем сообщение о загрузке
         await context.bot.delete_message(
@@ -437,23 +453,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Обрабатываем результат
         if success:
-            # Преобразуем миллисекунды в читаемый формат
-            minutes = duration_ms / 60000
-            hours = minutes / 60
+            # Получаем общее время пользователя по этой задаче
+            total_minutes = helpers.get_task_time_for_user(task_id, clickup_user_id)
+            total_hours = total_minutes / 60.0
 
-            if hours >= 1:
-                time_str = f"{hours:.1f} ч"
+            # Форматируем вывод
+            if total_hours >= 1:
+                time_str = f"{total_hours:.1f} ч"
             else:
-                time_str = f"{minutes:.0f} мин"
+                time_str = f"{total_minutes:.0f} мин"
 
             task_name = next((t["name"] for t in helpers.user_logging_state[user_id]["tasks"]
                               if t["id"] == task_id), "Задача")
 
             await update.message.reply_text(
                 f"✅ Время успешно сохранено!\n"
-                f"• Затрачено: {time_str}\n"
-                f"• Задача: {task_name}"
-            )
+                f"• Затрачено: {duration_minutes:.1f} мин\n"
+                f"• Всего по задаче: {time_str}\n"
+                f"• Задача: {task_name}")
+
             loading_msg = await update.message.reply_text("⏳ Загружаю контекстное меню..")
             await current_context(update, context)
             await context.bot.delete_message(
