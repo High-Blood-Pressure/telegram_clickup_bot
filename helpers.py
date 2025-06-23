@@ -56,6 +56,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS task_time (
             task_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
+            user_name TEXT, 
             total_minutes REAL NOT NULL DEFAULT 0,
             PRIMARY KEY (task_id, user_id),
             FOREIGN KEY (task_id) REFERENCES tasks(task_id)
@@ -213,22 +214,6 @@ def get_user_context(user_id: int) -> Dict[str, Any]:
             logger.info(f"Создан новый контекст для пользователя {user_id}")
 
         return user_data[user_id]
-
-
-def is_context_ready(user_id: int) -> bool:
-    """Проверяет, установлены ли все необходимые параметры контекста"""
-    context = get_user_context(user_id)
-    return all([
-        context.get("current_workspace"),
-        context.get("current_sprint"),
-        context.get("current_user")
-    ])
-
-
-def get_current_workspace_id(user_id: int) -> Optional[str]:
-    """Возвращает ID текущего workspace пользователя"""
-    context = get_user_context(user_id)
-    return context.get("current_workspace")
 
 
 async def get_clickup_sprints(workspace_id: str) -> List[Dict]:
@@ -429,21 +414,19 @@ def parse_time_input(time_str: str) -> Optional[int]:
         return None
 
 
-def log_time_locally(task_id: str, user_id: str, duration_minutes: float) -> bool:
+def log_time_locally(task_id: str, user_id: str, user_name: str, duration_minutes: float) -> bool:
     """Добавляет время к суммарному значению для участника задачи"""
     try:
         with db_lock:
             with sqlite3.connect(DB_FILE) as conn:
                 cursor = conn.cursor()
-
-                # Используем UPSERT для обновления или создания записи
                 cursor.execute("""
-                               INSERT INTO task_time (task_id, user_id, total_minutes)
-                               VALUES (?, ?, ?) ON CONFLICT(task_id, user_id) DO
+                               INSERT INTO task_time (task_id, user_id, user_name, total_minutes)
+                               VALUES (?, ?, ?, ?) ON CONFLICT(task_id, user_id) DO
                                UPDATE SET
-                                   total_minutes = total_minutes + excluded.total_minutes
-                               """, (task_id, user_id, duration_minutes))
-
+                                   total_minutes = total_minutes + excluded.total_minutes,
+                                   user_name = excluded.user_name
+                               """, (task_id, user_id, user_name, duration_minutes))
                 conn.commit()
                 return True
 
@@ -452,7 +435,7 @@ def log_time_locally(task_id: str, user_id: str, duration_minutes: float) -> boo
         return False
 
     except Exception as e:
-        logger.exception(f"Критическая ошибка при сохранении времени: {e}")
+        logger.exception(f"Ошибка при сохранении времени: {e}")
         return False
 
 
@@ -510,7 +493,7 @@ def get_sprint_tasks_from_cache(sprint_id: str) -> List[Dict]:
 
     except sqlite3.OperationalError as e:
         logger.error(f"Ошибка блокировки БД: {e}")
-        return False
+        return []
 
     except Exception as e:
         logger.error(f"Ошибка при получении задач из кэша: {e}")
@@ -547,13 +530,125 @@ def cache_task(task_data: dict):
         logger.error(f"Ошибка при кэшировании задачи: {e}")
 
 
-async def get_user_tasks(sprint_id: str, user_id: str) -> List[Dict]:
-    """Получает задачи пользователя в спринте со статусом 'in progress'"""
-    # Используем новую функцию для получения всех задач
-    all_tasks = await get_all_user_tasks_in_sprint(sprint_id, user_id)
+async def get_all_tasks_in_sprint(sprint_id: str) -> List[Dict]:
+    """Получает ВСЕ задачи в спринте (без фильтрации по пользователю)"""
+    if not CLICKUP_API_TOKEN:
+        logger.error("ClickUp API токен не настроен!")
+        return []
 
-    # Фильтруем задачи со статусом "in progress"
-    return [
-        task for task in all_tasks
-        if task.get("status", {}).get("status", "").lower() == "in progress"
-    ]
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.clickup.com/api/v2/list/{sprint_id}/task",
+                params={
+                    "include_closed": "true",
+                    "subtasks": "true"
+                },
+                headers={"Authorization": CLICKUP_API_TOKEN},
+                timeout=15.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("tasks", [])
+    except Exception as e:
+        logger.exception(f"Ошибка при получении задач: {e}")
+        return []
+
+
+def get_all_tasks_in_sprint_with_time(sprint_id: str) -> List[Dict]:
+    """Возвращает все задачи спринта с информацией о времени участников"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                cursor = conn.cursor()
+                # Получаем задачи спринта
+                cursor.execute("""
+                               SELECT t.task_id, t.name, t.url, t.status, t.estimated_minutes
+                               FROM tasks t
+                               WHERE t.sprint_id = ?
+                               """, (sprint_id,))
+
+                tasks = []
+                for row in cursor.fetchall():
+                    task = {
+                        "id": row[0],
+                        "name": row[1],
+                        "url": row[2],
+                        "status": row[3],
+                        "estimated_minutes": row[4]
+                    }
+
+                    # Получаем время участников
+                    cursor.execute("""
+                                   SELECT tt.user_id, tt.user_name, tt.total_minutes
+                                   FROM task_time tt
+                                   WHERE tt.task_id = ?
+                                   """, (row[0],))
+
+                    assignees = []
+                    for assignee_row in cursor.fetchall():
+                        assignees.append({
+                            "user_id": assignee_row[0],
+                            "user_name": assignee_row[1] or f"User {assignee_row[0]}",
+                            "minutes": assignee_row[2]
+                        })
+
+                    task["assignees"] = assignees
+                    tasks.append(task)
+
+                return tasks
+    except Exception as e:
+        logger.exception(f"Ошибка при получении задач спринта: {e}")
+        return []
+
+
+def get_sprint_tasks_summary(sprint_id: str) -> List[Dict]:
+    """Returns a summary of all tasks in sprint with assignee time"""
+    try:
+        with db_lock:
+            with sqlite3.connect(DB_FILE) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                # Get all tasks and their assignees with time
+                cursor.execute("""
+                               SELECT t.task_id,
+                                      t.name,
+                                      t.url,
+                                      t.status,
+                                      t.estimated_minutes,
+                                      tt.user_id,
+                                      tt.user_name,
+                                      tt.total_minutes
+                               FROM tasks t
+                                        LEFT JOIN task_time tt ON t.task_id = tt.task_id
+                               WHERE t.sprint_id = ?
+                               ORDER BY t.task_id
+                               """, (sprint_id,))
+
+                tasks = {}
+                for row in cursor.fetchall():
+                    task_id = row["task_id"]
+
+                    if task_id not in tasks:
+                        tasks[task_id] = {
+                            "id": task_id,
+                            "name": row["name"],
+                            "url": row["url"],
+                            "status": row["status"],
+                            "estimated_minutes": row["estimated_minutes"],
+                            "assignees": []
+                        }
+
+                    if row["user_id"]:
+                        tasks[task_id]["assignees"].append({
+                            "user_id": row["user_id"],
+                            "user_name": row["user_name"],
+                            "minutes": row["total_minutes"]
+                        })
+
+                return list(tasks.values())
+
+    except Exception as e:
+        logger.exception(f"Ошибка при получении сводки задач: {e}")
+        return []

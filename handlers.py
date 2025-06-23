@@ -125,7 +125,7 @@ async def change_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             keyboard.append([InlineKeyboardButton(
                 display_name,
-                callback_data=f"user_{member['id']}"
+                callback_data=f"user_{member['id']}_{member['username']}"  # Add username
             )])
 
         await update.callback_query.edit_message_text(
@@ -309,7 +309,10 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Изменить спринт", callback_data="change_sprint")],
             [InlineKeyboardButton("Изменить пользователя", callback_data="change_user")],
             [InlineKeyboardButton("Залогировать время", callback_data="log_my_time")],
-            [InlineKeyboardButton("📊 Статистика задач", callback_data="show_stats")]]
+            [InlineKeyboardButton("📊 Статистика задач", callback_data="show_stats")],
+            [InlineKeyboardButton("🔄 Обновить задачи", callback_data="refresh_tasks")],
+            [InlineKeyboardButton("📋 Все задачи спринта", callback_data="show_all_tasks")]]
+
 
         if update.callback_query:
             await update.callback_query.edit_message_text(
@@ -345,64 +348,83 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sprint_id = context_data["current_sprint"]
     user_id_str = context_data["current_user"]
 
+    # Получаем задачи из локального кэша только для текущего пользователя
     try:
-        # Получаем задачи из локального кэша
-        tasks = helpers.get_sprint_tasks_from_cache(sprint_id)
+        with helpers.db_lock:
+            with helpers.sqlite3.connect(helpers.DB_FILE) as conn:
+                cursor = conn.cursor()
 
-        if not tasks:
-            await query.edit_message_text("❌ Нет данных о задачах в этом спринте.")
-            return
+                # Получаем задачи спринта, где текущий пользователь залогировал время
+                cursor.execute("""
+                               SELECT t.task_id,
+                                      t.name,
+                                      t.url,
+                                      t.status,
+                                      t.estimated_minutes,
+                                      tt.total_minutes
+                               FROM tasks t
+                                        JOIN task_time tt ON t.task_id = tt.task_id
+                               WHERE t.sprint_id = ?
+                                 AND tt.user_id = ?
+                               """, (sprint_id, user_id_str))
 
-        # Форматируем статистику в виде таблицы
-        message = "📊 <b>Статистика задач:</b>\n\n"
-        message += "<pre>"
-        message += "┌──────────────────────────────────────┬───────────┬───────────┬─────────────┐\n"
-        message += "│ Задача                               │ Оценка (ч)│ Залог. (ч)│ Статус      │\n"
-        message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
+                tasks = []
+                for row in cursor.fetchall():
+                    tasks.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "url": row[2],
+                        "status": row[3],
+                        "estimated_minutes": row[4],
+                        "logged_minutes": row[5] or 0
+                    })
 
-        # Строки таблицы
-        for task in tasks:
-            # Получаем залогированное время для задачи
-            logged_minutes = helpers.get_task_time_for_user(task["id"], user_id_str)
+                if not tasks:
+                    await query.edit_message_text("❌ У вас нет задач в этом спринте.")
+                    return
 
-            # Конвертируем минуты в часы
-            estimated_hours = task['estimated_minutes'] / 60 if task.get('estimated_minutes') else 0
-            logged_hours = logged_minutes / 60
+                # Форматируем статистику
+                message = "📊 <b>Ваша статистика по задачам:</b>\n\n"
+                message += "<pre>"
+                message += "┌──────────────────────────────────────┬───────────┬───────────┬─────────────┐\n"
+                message += "│ Задача                               │ Оценка (ч)│ Залог. (ч)│ Статус      │\n"
+                message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
 
-            # Форматируем значения
-            estimated_str = f"{estimated_hours:.1f}" if estimated_hours > 0 else "-"
-            logged_str = f"{logged_hours:.1f}" if logged_hours > 0 else "-"
+                total_estimated = 0.0
+                total_logged = 0.0
 
-            # Обрезаем длинное название задачи
-            task_name = task['name']
-            if len(task_name) > 30:
-                task_name = task_name[:27] + "..."
+                for task in tasks:
+                    # Конвертируем минуты в часы
+                    estimated_hours = task['estimated_minutes'] / 60 if task.get('estimated_minutes') else 0
+                    logged_hours = task['logged_minutes'] / 60
 
-            # Форматируем строку таблицы
-            message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<11} │\n"
+                    total_estimated += estimated_hours
+                    total_logged += logged_hours
 
-        message += "└──────────────────────────────────────┴───────────┴───────────┴─────────────┘\n"
-        message += "</pre>\n\n"
+                    # Форматируем значения
+                    estimated_str = f"{estimated_hours:.1f}" if estimated_hours > 0 else "-"
+                    logged_str = f"{logged_hours:.1f}" if logged_hours > 0 else "-"
 
-        # Добавляем общую сводку
-        total_estimated = sum(task['estimated_minutes'] for task in tasks if task.get('estimated_minutes'))
-        total_logged = sum(helpers.get_task_time_for_user(task["id"], user_id_str) for task in tasks)
+                    # Обрезаем длинное название задачи
+                    task_name = task['name']
+                    if len(task_name) > 30:
+                        task_name = task_name[:27] + "..."
 
-        # Конвертируем в часы
-        total_estimated_hours = total_estimated / 60
-        total_logged_hours = total_logged / 60
+                    # Форматируем строку таблицы
+                    message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<11} │\n"
 
-        message += (
-            f"<b>Итого по спринту:</b>\n"
-            f"• Всего оценено: {total_estimated_hours:.1f} ч\n"
-            f"• Всего залогировано: {total_logged_hours:.1f} ч\n"
-        )
+                message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
+                message += f"│ {'Итого':<36} │ {total_estimated:>9.1f} │ {total_logged:>9.1f} │ {'':<11} │\n"
+                message += "└──────────────────────────────────────┴───────────┴───────────┴─────────────┘\n"
+                message += "</pre>\n\n"
 
-        await query.edit_message_text(message, parse_mode="HTML")
+                await query.edit_message_text(message, parse_mode="HTML")
 
     except Exception as e:
         helpers.logger.error(f"Ошибка при получении статистики: {e}")
         await query.edit_message_text("❌ Ошибка при загрузке статистики")
+
+
 # ======================
 #  BUTTON HANDLERS
 # ======================
@@ -435,6 +457,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔄 Загружаю статистику...")
         await show_statistics(update, context)
         return
+    elif data == "show_all_tasks":
+        await show_all_tasks(update, context)
+    elif data == "refresh_tasks":
+        await refresh_tasks(update, context)
 
     if data.startswith("ws_"):
         workspace_id = data.split("_", 1)[1]
@@ -457,8 +483,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     elif data.startswith("user_"):
-        user_id_str = data.split("_", 1)[1]
+        parts = data.split("_", 2)
+        user_id_str = parts[1]
+        user_name = parts[2] if len(parts) > 2 else f"User {user_id_str}"
         helpers.update_user_context(user_id, "current_user", user_id_str)
+        helpers.update_user_context(user_id, "current_user_name", user_name)
+
         sprint_id = helpers.get_user_context(user_id).get("current_sprint")
         if sprint_id:
             members = await helpers.get_clickup_list_members(sprint_id)
@@ -544,12 +574,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del helpers.user_logging_state[user_id]
             return
 
+        # Получаем имя пользователя из состояния
+        user_name = "Unknown"
+        context_data = helpers.get_user_context(user_id)
+        if context_data.get("current_user_name"):
+            user_name = context_data["current_user_name"]
+        else:
+            # Try to get from ClickUp if available
+            sprint_id = context_data.get("current_sprint")
+            if sprint_id:
+                members = await helpers.get_clickup_list_members(sprint_id)
+                member = next(
+                    (m for m in helpers.format_members(members)
+                     if str(m["id"]) == clickup_user_id),
+                    None
+                )
+                if member:
+                    user_name = member["username"]
+                    # Save for future use
+                    context_data["current_user_name"] = user_name
+
         # Логируем время
         loading_msg = await update.message.reply_text("⏳ Сохраняю время...")
 
         # Сохраняем время локально
         duration_minutes = duration_ms / 60000.0  # Конвертируем в минуты
-        success = helpers.log_time_locally(task_id, clickup_user_id, duration_minutes)
+        success = helpers.log_time_locally(
+            task_id,
+            clickup_user_id,
+            user_name,
+            duration_minutes
+        )
 
         # Удаляем сообщение о загрузке
         await context.bot.delete_message(
@@ -594,3 +649,114 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обработка других сообщений
     else:
         await update.message.reply_text("ℹ️ Используйте команды меню для работы с ботом")
+
+
+async def show_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows all tasks in sprint with assignees and time"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    context_data = helpers.get_user_context(user_id)
+
+    if not context_data.get("current_sprint"):
+        await query.edit_message_text("❌ Спринт не выбран!")
+        return
+
+    sprint_id = context_data["current_sprint"]
+
+    # Show loading message
+    await query.edit_message_text("🔄 Загружаю задачи...")
+
+    try:
+        tasks = helpers.get_sprint_tasks_summary(sprint_id)
+
+        if not tasks:
+            await query.edit_message_text("❌ В спринте нет задач")
+            return
+
+        # Format message
+        message = "📋 <b>Все задачи спринта:</b>\n\n"
+
+        for task in tasks:
+            # Shorten long task names
+            task_name = task['name']
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
+
+            message += f"🔹 <a href='{task['url']}'>{task_name}</a>\n"
+            message += f"   Статус: {task['status']}\n"
+
+            # Add estimated time if available
+            if task['estimated_minutes']:
+                est_hours = task['estimated_minutes'] / 60
+                message += f"   Оценка: {est_hours:.1f}ч | "
+
+            # Add total logged time
+            total_minutes = sum(a['minutes'] for a in task['assignees'])
+            total_hours = total_minutes / 60
+            message += f"Залог.: {total_hours:.1f}ч\n"
+
+            # Add assignees
+            if task['assignees']:
+                for assignee in task['assignees']:
+                    user_name = assignee['user_name'] or f"User {assignee['user_id']}"
+                    user_time = assignee['minutes'] / 60
+                    message += f"   👤 {user_name}: {user_time:.1f}ч\n"
+            else:
+                message += "   👤 Нет данных\n"
+
+            message += "────────────────\n"
+
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        helpers.logger.error(f"Ошибка при показе задач: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке задач")
+
+
+async def refresh_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обновляет список задач и их статусы"""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    context_data = helpers.get_user_context(user_id)
+
+    if not context_data.get("current_sprint"):
+        await query.edit_message_text("❌ Спринт не выбран!")
+        return
+
+    sprint_id = context_data["current_sprint"]
+
+    await query.edit_message_text("🔄 Обновление задач...")
+
+    try:
+        # Получаем актуальные задачи из ClickUp
+        tasks = await helpers.get_all_tasks_in_sprint(sprint_id)
+
+        if not tasks:
+            await query.edit_message_text("❌ В спринте нет задач")
+            return
+
+        # Обновляем кэш
+        for task in tasks:
+            estimated_ms = task.get("time_estimate")
+            estimated_minutes = estimated_ms / 60000.0 if estimated_ms else 0
+
+            helpers.cache_task({
+                "id": task["id"],
+                "name": task.get("name", ""),
+                "url": task.get("url", ""),
+                "status": task.get("status", {}).get("status", "unknown"),
+                "workspace_id": context_data["current_workspace"],
+                "sprint_id": sprint_id,
+                "estimated_minutes": estimated_minutes
+            })
+
+        await query.edit_message_text("✅ Задачи успешно обновлены!")
+
+    except Exception as e:
+        helpers.logger.error(f"Ошибка при обновлении задач: {e}")
+        await query.edit_message_text("❌ Ошибка при обновлении задач")
