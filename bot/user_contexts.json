@@ -15,5 +15,22 @@
       "folder_id": "90150698378",
       "folder_name": "Sprint Folder"
     }
+  },
+  "697488744": {
+    "current_workspace": "9015106496",
+    "current_sprint": "901512442688",
+    "current_user": "68610051",
+    "current_user_name": "Максим Гаврилюк",
+    "current_sprint_name": {
+      "id": "901512442688",
+      "name": "Sprint 41 (TEST_LOGGING)",
+      "folder_id": "90150698378",
+      "folder_name": "Sprint Folder"
+    },
+    "current_workspace_name": {
+      "id": "9015106496",
+      "name": "High Blood Pressure",
+      "color": "#595d66"
+    }
   }
 }
