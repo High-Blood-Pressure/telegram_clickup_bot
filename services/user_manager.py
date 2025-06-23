@@ -90,7 +90,9 @@ def get_user_context(user_id: int) -> Dict[str, Any]:
                 "current_workspace": None,
                 "current_sprint": None,
                 "current_user": None,
-                "current_user_name": None
+                "current_user_name": None,
+                "current_sprint_name": None,
+                "current_workspace_name": None
             }
             global user_data_dirty
             user_data_dirty = True

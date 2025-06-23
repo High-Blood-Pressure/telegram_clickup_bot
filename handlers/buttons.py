@@ -32,6 +32,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update_user_context(user_id, "current_workspace", workspace_id)
         update_user_context(user_id, "current_sprint", None)
         update_user_context(user_id, "current_user", None)
+        update_user_context(user_id, "current_workspace_name", None)
+        update_user_context(user_id, "current_sprint_name", None)
+        update_user_context(user_id, "current_user_name", None)
         await query.edit_message_text(f"✅ Workspace установлен\n⏳ Загружаю контекстное меню..")
         await current_context(update, context)
 
@@ -39,6 +42,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sprint_id = data.split("_", 1)[1]
         update_user_context(user_id, "current_sprint", sprint_id)
         update_user_context(user_id, "current_user", None)
+        update_user_context(user_id, "current_sprint_name", None)
+        update_user_context(user_id, "current_user_name", None)
         await query.edit_message_text(f"✅ Спринт установлен\n⏳ Загружаю контекстное меню..")
         await current_context(update, context)
 

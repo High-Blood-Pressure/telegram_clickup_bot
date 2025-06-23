@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.user_manager import get_user_context, is_admin, get_shutting_down, set_shutting_down
-from services import clickup, stop_application
+from services import clickup, stop_application, update_user_context
 from utils.formatting import format_workspaces, format_sprints, format_members
 from utils.logger import logger
 import asyncio
@@ -50,9 +50,13 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         workspace_id = context_data.get("current_workspace")
         if workspace_id:
-            workspaces = await clickup.get_clickup_teams()
-            workspace = next((ws for ws in format_workspaces(workspaces)
-                              if ws["id"] == workspace_id), None)
+            workspace = context_data.get("current_workspace_name")
+            if not workspace:
+                workspaces = await clickup.get_clickup_teams()
+                workspace = next((ws for ws in format_workspaces(workspaces)
+                                  if ws["id"] == workspace_id), None)
+                update_user_context(user_id, "current_workspace_name", workspace)
+
             text += f"🏢 <b>Workspace:</b> {workspace['name'] if workspace else f'ID {workspace_id}'}\n"
         else:
             text += "🏢 <b>Workspace:</b> не выбран\n"
@@ -62,8 +66,12 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sprint_id = context_data.get("current_sprint")
         if sprint_id:
             if workspace_id:
-                sprints = await clickup.get_clickup_sprints(workspace_id)
-                sprint = next((s for s in format_sprints(sprints) if s["id"] == sprint_id), None)
+                sprint = context_data.get("current_sprint_name")
+                if not sprint:
+                    sprints = await clickup.get_clickup_sprints(workspace_id)
+                    sprint = next((s for s in format_sprints(sprints) if s["id"] == sprint_id), None)
+                    update_user_context(user_id, "current_sprint_name", sprint)
+
                 if sprint:
                     text += f"⏳ <b>Спринт:</b> {sprint['name']}\n"
                     text += f"   <i>Папка:</i> {sprint.get('folder_name', 'Sprint')}\n"
@@ -79,14 +87,10 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         user_id_str = context_data.get("current_user")
         if user_id_str:
             if sprint_id:
-                members = await clickup.get_clickup_list_members(sprint_id)
-                member = next((m for m in format_members(members)
-                               if str(m["id"]) == str(user_id_str)), None)
-                if member:
-                    text += f"👤 <b>Пользователь:</b> {member['username']}\n"
-                    text += f"   <i>ID:</i> {member['id']}\n"
-                    if member['email']:
-                        text += f"   <i>Email:</i> {member['email']}\n"
+                user_name = context_data.get("current_user_name")
+                if user_name:
+                    text += f"👤 <b>Пользователь:</b> {user_name}\n"
+                    text += f"   <i>ID:</i> {user_id_str}\n"
                 else:
                     text += f"👤 <b>Пользователь:</b> ID {user_id_str}\n"
             else:
