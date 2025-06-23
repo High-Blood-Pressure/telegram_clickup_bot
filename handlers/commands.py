@@ -40,6 +40,11 @@ async def shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     asyncio.create_task(stop_application())
     await update.message.reply_text("🛑 Выключаю бота...")
+    await context.bot.send_photo(
+        chat_id=user_id,
+        photo="https://pic.rutubelist.ru/video/34/2d/342d3b1c217ef31a5e990934b99bd37b.jpg",
+        caption="Нижний текст"
+    )
 
 
 async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,18 +115,12 @@ async def current_context(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             [InlineKeyboardButton("📋 Все задачи спринта", callback_data="show_all_tasks")]
         ]
 
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="HTML"
-            )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
 
     except Exception as e:
         logger.error(f"Ошибка в current_context: {e}")

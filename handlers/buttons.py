@@ -22,10 +22,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await log_my_time(update, context)
     elif data == "show_stats":
         await show_statistics(update, context)
+        await current_context(update, context)
     elif data == "show_all_tasks":
         await show_all_tasks(update, context)
+        await current_context(update, context)
     elif data == "refresh_tasks":
         await refresh_tasks(update, context)
+        await current_context(update, context)
 
     elif data.startswith("ws_"):
         workspace_id = data.split("_", 1)[1]
@@ -35,7 +38,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update_user_context(user_id, "current_workspace_name", None)
         update_user_context(user_id, "current_sprint_name", None)
         update_user_context(user_id, "current_user_name", None)
-        await query.edit_message_text(f"✅ Workspace установлен\n⏳ Загружаю контекстное меню..")
+        await query.edit_message_text(f"✅ Workspace установлен\n")
         await current_context(update, context)
 
     elif data.startswith("sprint_"):
@@ -44,7 +47,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update_user_context(user_id, "current_user", None)
         update_user_context(user_id, "current_sprint_name", None)
         update_user_context(user_id, "current_user_name", None)
-        await query.edit_message_text(f"✅ Спринт установлен\n⏳ Загружаю контекстное меню..")
+        await query.edit_message_text(f"✅ Спринт установлен\n")
         await current_context(update, context)
 
     elif data.startswith("user_"):
@@ -53,7 +56,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_name = parts[2] if len(parts) > 2 else f"User {user_id_str}"
         update_user_context(user_id, "current_user", user_id_str)
         update_user_context(user_id, "current_user_name", user_name)
-        await query.edit_message_text(f"✅ Пользователь установлен: {user_name}\n⏳ Загружаю контекстное меню..")
+        await query.edit_message_text(f"✅ Пользователь установлен: {user_name}\n")
         await current_context(update, context)
 
     elif data.startswith("task_"):
@@ -293,11 +296,10 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text("❌ У вас нет задач в этом спринте.")
                     return
 
-                message = "📊 <b>Ваша статистика по задачам:</b>\n\n"
+                message = "📊 <b>Ваша статистика:</b>\n\n"
                 message += "<pre>"
-                message += "┌──────────────────────────────────────┬───────────┬───────────┬─────────────┐\n"
-                message += "│ Задача                               │ Оценка (ч)│ Залог. (ч)│ Статус      │\n"
-                message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
+                message += "Задача              | Оц.ч | Лог.ч | Статус\n"
+                message += "------------------------------------------\n"
 
                 total_estimated = 0.0
                 total_logged = 0.0
@@ -309,19 +311,17 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     total_estimated += estimated_hours
                     total_logged += logged_hours
 
-                    estimated_str = f"{estimated_hours:.1f}" if estimated_hours > 0 else "-"
-                    logged_str = f"{logged_hours:.1f}" if logged_hours > 0 else "-"
-
                     task_name = task['name']
-                    if len(task_name) > 30:
-                        task_name = task_name[:27] + "..."
+                    if len(task_name) > 20:
+                        task_name = task_name[:17] + ".."
 
-                    message += f"│ {task_name:<36} │ {estimated_str:>9} │ {logged_str:>9} │ {task['status']:<11} │\n"
+                    status = task['status'][:8] if task['status'] else "-"
 
-                message += "├──────────────────────────────────────┼───────────┼───────────┼─────────────┤\n"
-                message += f"│ {'Итого':<36} │ {total_estimated:>9.1f} │ {total_logged:>9.1f} │ {'':<11} │\n"
-                message += "└──────────────────────────────────────┴───────────┴───────────┴─────────────┘\n"
-                message += "</pre>\n\n"
+                    message += f"{task_name:<20} {estimated_hours:>5.1f} {logged_hours:>6.1f} {status:>8}\n"
+
+                message += "------------------------------------------\n"
+                message += f"{'Итого:':<20} {total_estimated:>5.1f} {total_logged:>6.1f}\n"
+                message += "</pre>"
 
                 await query.edit_message_text(message, parse_mode="HTML")
 
