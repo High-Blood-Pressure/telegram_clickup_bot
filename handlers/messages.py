@@ -1,10 +1,12 @@
 from telegram import Update
 from telegram.ext import ContextTypes
+
+from handlers import show_menu
 from services.user_manager import get_user_context, user_logging_state
 from services.time_utils import parse_time_input
-from services.clickup import get_clickup_list_members
-from services.database import log_time_locally, get_task_time_for_user
-from handlers.buttons import current_context
+from services.clickup import get_clickup_list_members, put_new_task_estimate
+from services.database import log_time_locally, get_task_time_for_user, change_task_estimate
+from handlers.buttons import show_current_context
 from utils.logger import log_exceptions
 from utils import format_members
 
@@ -12,6 +14,33 @@ from utils import format_members
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message_text = update.message.text
+
+    if user_id in user_logging_state and user_logging_state[user_id].get("action") == "estimate_edit":
+        duration_ms = parse_time_input(message_text)
+        if not duration_ms or duration_ms <= 0:
+            await update.message.reply_text("❌ Неверный формат времени!")
+            return
+
+        new_estimate_minutes = duration_ms / 60000.0
+        task_id = user_logging_state[user_id]["task_id"]
+
+        loading_msg = await update.message.reply_text("⏳ Обновляю оценку...")
+        success = await put_new_task_estimate(task_id, new_estimate_minutes)
+        if success:
+            change_task_estimate(task_id, new_estimate_minutes)
+
+        await context.bot.delete_message(
+            chat_id=update.effective_chat.id,
+            message_id=loading_msg.message_id
+        )
+
+        if success:
+            await update.message.reply_text(f"✅ Оценка обновлена: {new_estimate_minutes:.1f} минут")
+        else:
+            await update.message.reply_text("❌ Ошибка при обновлении оценки")
+
+        del user_logging_state[user_id]
+        return
 
     if user_id in user_logging_state and "task_id" in user_logging_state[user_id]:
         duration_ms = parse_time_input(message_text)
@@ -85,8 +114,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• Всего по задаче: {time_str}\n"
                 f"• Задача: {task_name}")
 
-            loading_msg = await update.message.reply_text("⏳ Загружаю контекстное меню..")
-            await current_context(update, context)
+            loading_msg = await update.message.reply_text("⏳ Загружаю меню..")
+            await show_menu(update, context)
             await context.bot.delete_message(
                 chat_id=update.effective_chat.id,
                 message_id=loading_msg.message_id

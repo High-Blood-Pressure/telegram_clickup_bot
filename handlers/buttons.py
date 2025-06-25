@@ -1,10 +1,12 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from services.user_manager import get_user_context, update_user_context, user_logging_state
-from services import clickup, database, get_sprint_tasks_summary, get_all_tasks_in_sprint, cache_task
+from services import clickup, database, get_sprint_tasks_summary, get_all_tasks_in_sprint, cache_task, \
+    get_user_sprint_statistics
 from utils.formatting import format_workspaces, format_sprints, format_members, format_tasks
 from utils.logger import logger
-from handlers import current_context
+from handlers import show_current_context, show_menu
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -22,33 +24,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await log_my_time(update, context)
     elif data == "show_stats":
         await show_statistics(update, context)
-        await current_context(update, context)
     elif data == "show_all_tasks":
         await show_all_tasks(update, context)
-        await current_context(update, context)
     elif data == "refresh_tasks":
         await refresh_tasks(update, context)
-        await current_context(update, context)
+        await show_menu(update, context)
+    elif data == "current_context":
+        await show_current_context(update, context)
+    elif data == "show_menu":
+        await show_menu(update, context)
+    elif data == "show_tasks_without_estimate":
+        await show_tasks_without_estimate(update, context)
+    elif data == "change_task_estimate":
+        await change_task_estimate(update, context)
 
     elif data.startswith("ws_"):
         workspace_id = data.split("_", 1)[1]
         update_user_context(user_id, "current_workspace", workspace_id)
         update_user_context(user_id, "current_sprint", None)
         update_user_context(user_id, "current_user", None)
-        update_user_context(user_id, "current_workspace_name", None)
-        update_user_context(user_id, "current_sprint_name", None)
+        update_user_context(user_id, "current_workspace_data", None)
+        update_user_context(user_id, "current_sprint_data", None)
         update_user_context(user_id, "current_user_name", None)
         await query.edit_message_text(f"✅ Workspace установлен\n")
-        await current_context(update, context)
+        await show_current_context(update, context)
 
     elif data.startswith("sprint_"):
         sprint_id = data.split("_", 1)[1]
         update_user_context(user_id, "current_sprint", sprint_id)
         update_user_context(user_id, "current_user", None)
-        update_user_context(user_id, "current_sprint_name", None)
+        update_user_context(user_id, "current_sprint_data", None)
         update_user_context(user_id, "current_user_name", None)
         await query.edit_message_text(f"✅ Спринт установлен\n")
-        await current_context(update, context)
+        await show_current_context(update, context)
 
     elif data.startswith("user_"):
         parts = data.split("_", 2)
@@ -57,7 +65,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         update_user_context(user_id, "current_user", user_id_str)
         update_user_context(user_id, "current_user_name", user_name)
         await query.edit_message_text(f"✅ Пользователь установлен: {user_name}\n")
-        await current_context(update, context)
+        await show_current_context(update, context)
 
     elif data.startswith("task_"):
         task_id = data.split("_", 1)[1]
@@ -84,6 +92,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "• 2h30m - 2 часа 30 минут\n\n"
                 "Или просто число (в минутах): 150"
             )
+
+    elif data.startswith("estimate_task_"):
+        task_id = data.split('_', 2)[2]
+        await handle_estimate_task(update, context, task_id)
+
+    elif data == "cancel_estimate":
+        if user_id in user_logging_state:
+            del user_logging_state[user_id]
+        await query.edit_message_text("❌ Изменение оценки отменено")
 
     elif data == "log_cancel":
         if user_id in user_logging_state:
@@ -264,66 +281,53 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_str = context_data["current_user"]
 
     try:
-        with database.db_lock:
-            with database.sqlite3.connect(database.DB_FILE) as conn:
-                cursor = conn.cursor()
+        tasks = get_user_sprint_statistics(sprint_id, user_id_str)
 
-                cursor.execute("""
-                               SELECT t.task_id,
-                                      t.name,
-                                      t.url,
-                                      t.status,
-                                      t.estimated_minutes,
-                                      tt.total_minutes
-                               FROM tasks t
-                                        JOIN task_time tt ON t.task_id = tt.task_id
-                               WHERE t.sprint_id = ?
-                                 AND tt.user_id = ?
-                               """, (sprint_id, user_id_str))
+        if not tasks:
+            await query.edit_message_text("❌ У вас нет задач в этом спринте.")
+            return
 
-                tasks = []
-                for row in cursor.fetchall():
-                    tasks.append({
-                        "id": row[0],
-                        "name": row[1],
-                        "url": row[2],
-                        "status": row[3],
-                        "estimated_minutes": row[4],
-                        "logged_minutes": row[5] or 0
-                    })
+        message = "📊 <b>Статистика пользователя:</b>\n\n"
 
-                if not tasks:
-                    await query.edit_message_text("❌ У вас нет задач в этом спринте.")
-                    return
+        total_estimated = 0.0
+        total_logged = 0.0
 
-                message = "📊 <b>Ваша статистика:</b>\n\n"
-                message += "<pre>"
-                message += "Задача              | Оц.ч | Лог.ч | Статус\n"
-                message += "------------------------------------------\n"
+        for task in tasks:
+            estimated_minutes = task['estimated_minutes']
+            logged_minutes = task['logged_minutes']
 
-                total_estimated = 0.0
-                total_logged = 0.0
+            estimated_hours = estimated_minutes / 60 if estimated_minutes else 0
+            logged_hours = logged_minutes / 60
 
-                for task in tasks:
-                    estimated_hours = task['estimated_minutes'] / 60 if task.get('estimated_minutes') else 0
-                    logged_hours = task['logged_minutes'] / 60
+            total_estimated += estimated_hours
+            total_logged += logged_hours
 
-                    total_estimated += estimated_hours
-                    total_logged += logged_hours
+            task_name = task['name']
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
 
-                    task_name = task['name']
-                    if len(task_name) > 20:
-                        task_name = task_name[:17] + ".."
+            message += f"🔹 <a href='{task['url']}'>{task_name}</a>\n"
+            message += f"   Статус: {task['status']}\n"
+            message += f"   {logged_hours:.1f}h"
 
-                    status = task['status'][:8] if task['status'] else "-"
+            if estimated_minutes:
+                message += f" / {estimated_hours:.1f}h\n"
+            else:
+                message += " / NOT ESTIMATED\n"
 
-                    message += f"{task_name:<20} {estimated_hours:>5.1f} {logged_hours:>6.1f} {status:>8}\n"
+            message += "────────────────\n"
 
-                message += "------------------------------------------\n"
-                message += f"{'Итого:':<20} {total_estimated:>5.1f} {total_logged:>6.1f}\n"
-                message += "</pre>"
+        message += f"\n<b>Итого:</b> {total_logged:.1f}h"
+        if total_estimated:
+            message += f" / {total_estimated:.1f}h"
 
-                await query.edit_message_text(message, parse_mode="HTML")
+        keyboard = [[InlineKeyboardButton("Вернуться в меню", callback_data="show_menu")]]
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
@@ -360,28 +364,32 @@ async def show_all_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message += f"🔹 <a href='{task['url']}'>{task_name}</a>\n"
             message += f"   Статус: {task['status']}\n"
 
-            if task['estimated_minutes']:
-                est_hours = task['estimated_minutes'] / 60
-                message += f"   Оценка: {est_hours:.1f}ч | "
-
             total_minutes = sum(a['minutes'] for a in task['assignees'])
             total_hours = total_minutes / 60
-            message += f"Залог.: {total_hours:.1f}ч\n"
+            message += f"   {total_hours:.1f}h /"
+
+            if task['estimated_minutes']:
+                est_hours = task['estimated_minutes'] / 60
+                message += f" {est_hours}h\n"
+            else:
+                message += " NOT ESTIMATED\n"
 
             if task['assignees']:
                 for assignee in task['assignees']:
                     user_name = assignee['user_name'] or f"User {assignee['user_id']}"
                     user_time = assignee['minutes'] / 60
-                    message += f"   👤 {user_name}: {user_time:.1f}ч\n"
+                    message += f"   👤 {user_name}: {user_time:.1f}h\n"
             else:
-                message += "   👤 Нет данных\n"
+                message += "   Информации о логировании нет\n"
 
             message += "────────────────\n"
 
+        keyboard = [[InlineKeyboardButton("Вернуться в меню", callback_data="show_menu")]]
         await query.edit_message_text(
             message,
             parse_mode="HTML",
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     except Exception as e:
@@ -429,3 +437,132 @@ async def refresh_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Ошибка при обновлении задач: {e}")
         await query.edit_message_text("❌ Ошибка при обновлении задач")
+
+
+async def show_tasks_without_estimate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user_id = query.from_user.id
+    context_data = get_user_context(user_id)
+
+    if not context_data.get("current_sprint"):
+        await query.edit_message_text("❌ Спринт не выбран!")
+        return
+
+    sprint_id = context_data["current_sprint"]
+    await query.edit_message_text("🔄 Загружаю задачи без оценки...")
+
+    try:
+        tasks = get_sprint_tasks_summary(sprint_id)
+        if not tasks:
+            await query.edit_message_text("❌ В спринте нет задач")
+            return
+
+        tasks_without_estimate = [
+            task for task in tasks
+            if not task.get('estimated_minutes') or task['estimated_minutes'] == 0
+        ]
+
+        if not tasks_without_estimate:
+            await query.edit_message_text("✅ В спринте нет задач без оценки!")
+            return
+
+        message = "📋 <b>Задачи спринта без оценки:</b>\n\n"
+
+        for task in tasks_without_estimate:
+            task_name = task['name']
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
+
+            message += f"🔹 <a href='{task['url']}'>{task_name}</a>\n"
+            message += f"   Статус: {task['status']}\n"
+
+            total_minutes = sum(a['minutes'] for a in task['assignees'])
+            total_hours = total_minutes / 60
+            message += f"   {total_hours:.1f}h / NOT ESTIMATED\n"
+
+            if task['assignees']:
+                for assignee in task['assignees']:
+                    user_name = assignee['user_name'] or f"User {assignee['user_id']}"
+                    user_time = assignee['minutes'] / 60
+                    message += f"   👤 {user_name}: {user_time:.1f}ч\n"
+            else:
+                message += "   Информации о логировании нет\n"
+
+            message += "────────────────\n"
+
+        keyboard = [[InlineKeyboardButton("Вернуться в меню", callback_data="show_menu")]]
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при показе задач без оценки: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке задач")
+
+
+async def change_task_estimate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    context_data = get_user_context(user_id)
+
+    if not context_data.get("current_sprint"):
+        await query.edit_message_text("❌ Сначала выберите спринт!")
+        return
+
+    sprint_id = context_data["current_sprint"]
+    await query.edit_message_text("🔄 Загружаю задачи спринта...")
+
+    try:
+        tasks = get_sprint_tasks_summary(sprint_id)
+        if not tasks:
+            await query.edit_message_text("❌ В спринте нет задач")
+            return
+
+        keyboard = []
+        for task in tasks:
+            task_name = task['name']
+            if len(task_name) > 50:
+                task_name = task_name[:47] + "..."
+
+            estimated = task.get('estimated_minutes')
+            status = f"{estimated / 60:.1f}h" if estimated and estimated > 0 else "NOT ESTIMATED"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{task_name} ({status})",
+                    callback_data=f"estimate_task_{task['id']}"
+                )
+            ])
+
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_estimate")])
+
+        await query.edit_message_text(
+            "📋 Выберите задачу для изменения оценки:",
+            reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке задач: {e}")
+        await query.edit_message_text("❌ Ошибка при загрузке задач")
+
+
+async def handle_estimate_task(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: str) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    user_logging_state[user_id] = {
+        "action": "estimate_edit",
+        "task_id": task_id
+    }
+
+    await query.edit_message_text(
+        "Введите новую оценку для задачи в формате:\n"
+        "• 1.5h - полтора часа\n"
+        "• 90m - 90 минут\n"
+        "• 2h30m - 2 часа 30 минут\n\n"
+        "Или просто число (в минутах): 150"
+    )

@@ -190,3 +190,4 @@ timelogger.db
 timelogger.db
 *.db
 bot/user_contexts.json
+.idea/sqldialects.xml

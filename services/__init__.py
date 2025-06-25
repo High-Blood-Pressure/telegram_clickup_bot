@@ -3,7 +3,8 @@ from .clickup import (
     get_clickup_sprints,
     get_clickup_list_members,
     get_all_user_tasks_in_sprint,
-    get_all_tasks_in_sprint
+    get_all_tasks_in_sprint,
+    put_new_task_estimate
 )
 
 from .database import (
@@ -13,7 +14,9 @@ from .database import (
     cache_task,
     get_sprint_tasks_from_cache,
     get_all_tasks_in_sprint_with_time,
-    get_sprint_tasks_summary
+    get_sprint_tasks_summary,
+    change_task_estimate,
+    get_user_sprint_statistics
 )
 
 from .time_utils import parse_time_input
@@ -40,6 +43,7 @@ __all__ = [
     'get_clickup_list_members',
     'get_all_user_tasks_in_sprint',
     'get_all_tasks_in_sprint',
+    'put_new_task_estimate',
 
     # Database
     'init_db',
@@ -49,6 +53,8 @@ __all__ = [
     'get_sprint_tasks_from_cache',
     'get_all_tasks_in_sprint_with_time',
     'get_sprint_tasks_summary',
+    'change_task_estimate',
+    'get_user_sprint_statistics',
 
     # Time utils
     'parse_time_input',

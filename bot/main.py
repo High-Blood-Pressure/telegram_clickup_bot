@@ -8,7 +8,7 @@ from telegram.ext import (
     filters
 )
 from bot.error_handler import error_handler
-from handlers.commands import start, shutdown, current_context
+from handlers.commands import start, shutdown, show_current_context, show_menu
 from handlers.buttons import button_handler
 from handlers.messages import handle_message
 from utils.config import TELEGRAM_BOT_TOKEN
@@ -42,7 +42,8 @@ def main() -> None:
     handlers = [
         CommandHandler("start", start),
         CommandHandler("shutdown", shutdown),
-        CommandHandler("context", current_context),
+        CommandHandler("context", show_current_context),
+        CommandHandler("menu", show_menu),
         CallbackQueryHandler(button_handler),
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     ]

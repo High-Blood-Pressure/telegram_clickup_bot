@@ -256,3 +256,49 @@ def get_sprint_tasks_summary(sprint_id: str) -> List[Dict]:
     except sqlite3.Error as e:
         logger.error(f"Error fetching sprint summary: {e}")
         return []
+
+
+def get_user_sprint_statistics(sprint_id: str, user_id: str) -> List[Dict]:
+    try:
+        with db_lock, sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT t.task_id,
+                       t.name,
+                       t.url,
+                       t.status,
+                       t.estimated_minutes,
+                       tt.total_minutes AS logged_minutes
+                FROM tasks t
+                JOIN task_time tt ON t.task_id = tt.task_id
+                WHERE t.sprint_id = ?
+                  AND tt.user_id = ?
+            """, (sprint_id, user_id))
+
+            return [{
+                "id": row[0],
+                "name": row[1],
+                "url": row[2],
+                "status": row[3],
+                "estimated_minutes": row[4],
+                "logged_minutes": row[5] or 0
+            } for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при получении статистики пользователя: {e}")
+        return []
+
+
+def change_task_estimate(task_id: str, new_estimate_minutes: float) -> bool:
+    try:
+        with db_lock, sqlite3.connect(DB_FILE) as conn:
+            conn.execute("""
+                UPDATE tasks
+                SET estimated_minutes = ?
+                WHERE task_id = ?
+            """, (new_estimate_minutes, task_id))
+            conn.commit()
+            return True
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка обновления оценки: {e}")
+        return False

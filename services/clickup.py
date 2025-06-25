@@ -3,7 +3,7 @@ import functools
 from cachetools import TTLCache
 from utils.config import CLICKUP_API_TOKEN
 from utils.logger import logger
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
 cache = TTLCache(maxsize=100, ttl=300)
 
@@ -163,3 +163,28 @@ async def get_all_tasks_in_sprint(sprint_id: str) -> List[Dict]:
     except Exception as e:
         logger.exception(f"Error getting tasks: {e}")
     return []
+
+
+async def put_new_task_estimate(task_id: str, estimate_minutes: float) -> bool:
+    if not CLICKUP_API_TOKEN:
+        logger.error("ClickUp API token not configured!")
+        return False
+
+    estimate_ms = int(estimate_minutes * 60 * 1000)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                f"https://api.clickup.com/api/v2/task/{task_id}",
+                json={"time_estimate": estimate_ms},
+                headers={"Authorization": CLICKUP_API_TOKEN},
+                timeout=15.0
+            )
+            response.raise_for_status()
+
+            return True
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error updating task estimate: {e.response.status_code} - {e.response.text}")
+    except Exception as e:
+        logger.exception(f"Error updating task estimate: {e}")
+    return False
