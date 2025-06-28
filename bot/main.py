@@ -11,6 +11,7 @@ from bot.error_handler import error_handler
 from handlers.commands import start, shutdown, show_current_context, show_menu
 from handlers.buttons import button_handler
 from handlers.messages import handle_message
+from utils import CLICKUP_API_TOKEN
 from utils.config import TELEGRAM_BOT_TOKEN
 from utils.logger import logger
 from services.tasks import auto_save_task
@@ -19,6 +20,9 @@ from services.database import init_db
 
 
 def main() -> None:
+    logger.info(f"tgToken: {TELEGRAM_BOT_TOKEN}")
+    logger.info(f"clickupToken: {CLICKUP_API_TOKEN}")
+
     if not TELEGRAM_BOT_TOKEN:
         logger.error("Токен Telegram бота не найден в .env файле!")
         return
